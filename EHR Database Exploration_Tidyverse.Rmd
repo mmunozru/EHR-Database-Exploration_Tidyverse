@@ -1,0 +1,328 @@
+---
+title: "EHR Database Exploration (Synthea)"
+author: "Author: Marissa Munoz-Ruiz"
+output: html_document
+---
+
+$~$
+
+#### **Goal of Script:** Explore an electric health records (EHR) database  
+
+
+How do hospitals track the information of their patients? Information such as electronic health records are commonly stored in relational databases. 
+
+The data used for this script consists of six excel files that mimic the basic structure of a relational database. Each file can be seen as a table and may be related to another table by a common column i.e. field. For example, the field PatientID is present in the Patient file and also occurs in the OutpatientVisit file. Due to this structure, we can determine the number of hospital visits that a specific patient had for a specific year even though the information is spread across two different files. 
+
+The six excel files were downloaded from Synthea, a synthetic data generator that models the medical history of synthetic patients and their associated health records ([Synthea](https://synthetichealth.github.io/synthea/)). 
+
+I will use tidyverse to explore the data. Each section follows the same pattern: 
+
+* Question of interest
+* Tidyverse code 
+* Brief explanation of code output 
+
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(rstatix)
+library(ggplot2)
+library(scales)
+library(lubridate)
+library(knitr)
+
+folder = "healthcare"
+files = list.files(path = folder, pattern = "*.csv", full.names=TRUE)
+
+
+table1 <- tibble(File = character(), Rows = numeric(), Cols = numeric())
+
+for (f in 1:length(files)){
+  df <- read_csv(files[[f]])
+  name <- gsub('^.*/|*.csv','',files[[f]])
+  rows <- list(name, nrow(df), ncol(df))
+  table1[f,] <- rows
+  assign(name,df)
+  
+}
+
+kable(table1)
+
+```
+
+$~$
+
+#### **Which staff member makes the most money?**
+
+The summary function shows that the max value of Hourlyrate is \$20. Therefore I will use use Salary to determine employee compensation. The minimum value of Salary is \$1, so I will assume this is a data collection error and remove the observation from the Staff dataset. 
+
+
+```{r}
+
+summary(Staff)
+
+Staff_new <- Staff %>%
+  filter(!(Salary == min(Salary,na.rm=TRUE)))
+
+Staff_new %>%
+  filter(Salary == max(Salary))
+```
+
+According to the output, the highest paid staff member is Joshua Lucas with a salary of \$999,999, which is extremely high! Does Joshua's salary point to a pay disparity? 
+
+$~$
+
+#### **Is there a pay disparity across gender among staff members?**
+
+```{r, message=FALSE}
+
+Gender <- Staff_new %>%
+  group_by(Gender) %>%
+  summarize(Mean_Salary = mean(Salary, na.rm = TRUE),
+            Median_Salary = median(Salary, na.rm = TRUE),
+            SD_Salary = sd(Salary, na.rm = TRUE),
+            Skew=e1071::skewness(Salary)) 
+
+Gender %>%
+  ggplot(aes(x=Gender,y=Mean_Salary, fill=Gender)) + 
+  geom_col() +
+  geom_errorbar(aes(ymin=Mean_Salary-SD_Salary, ymax=Mean_Salary+SD_Salary),width=.2) +
+  scale_fill_manual(values=c("blue","purple")) +
+  labs(y="Average Salary", title = "Fig. 1: Salary by Gender") +
+  theme(plot.title = element_text(hjust=0.5)) +
+  #scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) 
+  scale_y_continuous(labels = label_number(suffix = " K", scale = 1e-3))
+
+Gender 
+
+```
+
+The average salary for each gender listed in the data is shown in Fig. 1. The plot suggests that males have a higher average salary compared to female staff. However the standard deviation for males is quite substantial ($\pm$ $~$ $\$$ 235,059) and is also heavily right-skewed (Skew = 2.98). A two-sample t-test is commonly used to determine if two means are statistically different. The t-test can be used when certain assumptions are met. Let's check the most important assumptions (outliers, normality, and heteroscedasticity) and also assume the samples are independent. 
+
+
+```{r}
+Staff_new %>%
+  group_by(Gender) %>%
+  identify_outliers(Salary)
+
+Staff_new %>%
+  group_by(Gender) %>%
+  shapiro_test(Salary)
+
+Staff_new %>%
+  levene_test(Salary ~ Gender)
+
+```
+
+
+There are two outliers in the male group, most notably Joshua Lucas who is also the highest paid staff member. The Shapiro-Wilk normality test shows that the normality assumption does not hold (p-value < 0.5) and the Levene Test for Equality of Variances shows that the homogeneity assumption holds (p-value > 0.5). Since the normality assumption does not hold and the sample size is fairly small (n = 28), the t-test isn't the most optimal test to use.
+
+However, not all is lost! The Mann-Withney-Wilcoxon test test does not assume the data is normally distributed and compares the median instead of the mean.
+
+```{r}
+
+wilcox.test(Salary ~ Gender, data=Staff_new)
+
+```
+
+A two-sample Mann-Withney-Wilcoxon test suggests there was not a significant difference between male and females with regards to Salary (p > 0.5). What if Joshua Lucas's salary was also a data collection error? Would there be a difference in salary if Josha Lucas was removed?
+
+```{r}
+
+Staff_NoJosh <- Staff %>%
+  filter(!(Salary == max(Salary,na.rm=TRUE)))
+
+Staff_NoJosh  %>%
+  group_by(Gender) %>%
+  shapiro_test(Salary)
+
+wilcox.test(Salary ~ Gender,data=Staff_NoJosh)
+
+```
+
+The Shapiro-Wilk normality test shows that the normality assumption does not hold (p-value < 0.5) for the male group. A two-sample Mann-Withney-Wilcoxon test suggests there was not a significant difference between male and females with regards to Salary (p > 0.5). Due to the small size of the data set and the synthetic nature of the data, this may not hold true for the general population of medical staff.  
+
+$~$
+
+#### **What is the salary breakdown when staff type is considered?**
+
+```{r,message=FALSE}
+
+#Salary by gender & staff type
+Gender_Staff <- Staff_new %>%
+  group_by(Gender,StaffType) %>%
+  summarize(Mean_Salary = mean(Salary, na.rm = TRUE),
+            Median_Salary = median(Salary, na.rm = TRUE),
+            SD_Salary = sd(Salary, na.rm = TRUE),
+            Skew=e1071::skewness(Salary))
+  
+Gender_Staff %>%
+  ggplot(aes(x=Gender,y=Mean_Salary, fill=Gender)) + 
+  geom_col() +
+  facet_wrap(~StaffType) +
+  scale_fill_manual(values=c("blue","purple")) +
+  geom_errorbar(aes(ymin=Mean_Salary-SD_Salary, ymax=Mean_Salary+SD_Salary),width=.2) +
+  labs(y="Average Salary", title="Fig. 2: Salary by Gender and Staff Type") +
+  theme(plot.title = element_text(hjust=0.5)) +
+  scale_y_continuous(labels = label_number(suffix = " K", scale = 1e-3))
+
+Gender_Staff
+
+```
+In Fig.2, the average salary is similar between female and male staff members when the position is clinic managers, nurses, or physicians. However, physicians assistants show a a large jump. As mentioned earlier, Joshua Lucas is mostly driving this difference. 
+
+$~$
+
+#### **Which staff member saw the most patients in 2016?**
+
+```{r}
+
+Staff %>%
+  inner_join(OutpatientVisit, by = 'StaffID') %>%
+  mutate(Year = year(VisitDate),.after='VisitDate') %>%
+  group_by(Year,StaffID,StaffType,FirstName,LastName) %>%
+  summarize(Visits = n()) %>%
+  filter(Year == 2016) %>%
+  arrange(desc(Visits)) %>%
+  head()
+  
+```
+
+In 2016, Juliann Williams had 479 outpatient visits as a nurse. 
+
+$~$
+
+#### **Which staff member saw the most patients in primary care settings in 2016?**
+
+```{r,message=FALSE}
+Staff %>%
+  inner_join(OutpatientVisit, by = 'StaffID') %>%
+  inner_join(Clinic, by = 'ClinicCode') %>%
+  mutate(Year = year(VisitDate),.after='VisitDate') %>%
+  filter(ClinicDescription == "Primary Care", Year == 2016) %>%
+  group_by(StaffID,StaffType,ClinicDescription,FirstName,LastName) %>%
+  summarize(Visits = n()) %>%
+  arrange(desc(Visits)) %>%
+  head()
+
+
+```
+In 2016, Juliann Williams had 479 outpatient visits, all of which were in a primary care setting. 
+
+$~$
+
+#### **Is there a difference in mortality between men and women?**
+
+```{r,message=FALSE}
+
+Patient %>%
+  inner_join(Mortality, by = "PatientID") %>%
+  group_by(Gender) %>%
+  summarize(Count = n()) %>%
+  filter(Gender %in% c('female','male')) %>% 
+  mutate(Proportion = round(Count/sum(Count),2)) 
+
+```
+
+Of all the people who were deceased in the data, 39% were female and 61% were male. It seems that there is a difference in mortality between gender. However, a two-proportions test would have to be conducted to determine if this difference is significant. The two-proportions test can be used when the sample size is large. The total number of patients in the data is 9045. 
+
+
+```{r}
+Props <- Patient %>%
+  left_join(Mortality, by = "PatientID") %>%
+  mutate(Deceased = ifelse(is.na(DateOfDeath),'Not Deceased','Deceased')) %>%
+  filter(Gender %in% c('female','male'))
+
+table(Props$Gender, Props$Deceased)
+
+prop.test(table(Props$Gender, Props$Deceased),correct=FALSE)
+```
+
+The two-proportions test strongly suggests that there is a difference in mortality rates (p-value < 0.5) between males and females. 
+
+$~$
+
+#### **Which disease is most prevalent? Which disease is least prevalent?**
+
+```{r,message=FALSE}
+#Assumption: Each visit counts regardless if it was the same patientt
+
+Outpatient <- OutpatientVisit %>%
+  mutate(ICD10 = ifelse(
+    (ICD10_1 %in% DiseaseMap$ICD10) |
+    (ICD10_2 %in% DiseaseMap$ICD10) |
+    (ICD10_2 %in% DiseaseMap$ICD10),
+    c(ICD10_1,ICD10_2,ICD10_3), NA), .after = 'ICD10_3') 
+
+Prevalence <- Outpatient %>%
+  inner_join(DiseaseMap, by = "ICD10") %>% 
+  group_by(Condition) %>% 
+  summarize(Visits = n()) %>%
+  mutate(Percent = round(Visits/sum(Visits, na.rm = TRUE),4)) 
+  
+Prevalence %>%
+  filter(Percent == max(Percent))
+
+Prevalence %>%
+  filter(Percent == min(Percent))
+
+  
+```
+
+Of all outpatient visits where a condition was listed, the most common condition was paralysis (46.8%) and the least common condition was HIV (0.2%). 
+
+$~$
+
+#### **Are there any diseases that are unevenly distributed across races?**
+
+```{r,message=FALSE}
+
+#Assumption: Each visit counts regardless if it was the same patient
+
+Outpatient %>%
+  inner_join(Patient, by = "PatientID") %>%
+  inner_join(DiseaseMap, by = "ICD10") %>%
+  group_by(Race, Condition) %>% 
+  summarize(Visits = n()) %>%
+  filter(Race %in% c("white","hispanic","black")) %>%
+  spread(.,Race,Visits) %>%
+  rowwise() %>%
+  mutate(total = sum(c(black,hispanic,white)),
+         perc_black = round(black/total,2),
+         perc_hispanic = round(hispanic/total,2),
+         perc_white = round(white/total,2)) %>%
+  arrange(desc(perc_white))
+
+
+```
+
+Across all the conditions, there were more outpatient visits by the white population than any other ethnic group. There were large amounts of outpatients visits for pulmonary conditions, metastatic solid tumors, and peptic ulcer diseases in the white population.
+
+$~$
+
+#### **Are there any diseases that are unevenly distributed across gender?**
+
+```{r,message=FALSE}
+
+#Assumption: Each visit counts regardless if it was the same patient
+
+Outpatient %>%
+  inner_join(Patient, by = "PatientID") %>%
+  inner_join(DiseaseMap, by = "ICD10") %>%
+  group_by(Gender, Condition) %>% 
+  summarize(Visits = n()) %>%
+  filter(Gender %in% c("female","male")) %>%
+  spread(.,Gender,Visits) %>%
+  rowwise() %>%
+  mutate(total = sum(c(female,male)),
+         perc_female = round(female/total,4),
+         perc_male = round(male/total,4)) %>%
+  arrange(desc(perc_female))
+
+
+```
+
+Across all conditions, there were more outpatient visits by the female population than the male population. The most outpatients visits for female patients were for depression, dementia, and peptic ulcer disease. 
+
